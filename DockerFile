@@ -1,0 +1,25 @@
+# Gunakan image Python yang ringan
+FROM python:3.11-slim
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies (dibutuhkan psycopg2)
+RUN apt-get update && apt-get install -y libpq-dev gcc && rm -rf /var/lib/apt/lists/*
+
+# Copy file requirements dan install
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy seluruh kode sumber
+COPY . .
+
+# Set Environment Variable untuk HuggingFace Cache
+ENV TRANSFORMERS_CACHE=/app/model_cache
+ENV HF_HOME=/app/model_cache
+
+# Ekspos port Gradio
+EXPOSE 7860
+
+# Jalankan Gradio app
+CMD ["python", "app.py"]

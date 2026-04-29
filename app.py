@@ -1,151 +1,93 @@
 import gradio as gr
-import psycopg2
-from pgvector.psycopg2 import register_vector
-import numpy as np
-from langchain_ollama import OllamaEmbeddings
-from langchain_groq import ChatGroq
-from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
-from markdown_pdf import MarkdownPdf, Section
-import re
 import os
 from dotenv import load_dotenv
+from markdown_pdf import MarkdownPdf, Section
 
-# Load variables from .env file
-load_dotenv()
+# --- IMPORT MODULES CLEAN CODE ---
+from retriever import FeedbackRetriever
+from agent_logic import PRDAgent
 
-# --- KONFIGURASI ---
+load_dotenv(override=True)
+
+# --- KONFIGURASI GLOBAL ---
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-DB_PARAMS = {"dbname": "prd_db", "user": "postgres", "password": "postgres", "host": "localhost"}
+DB_PARAMS = {
+    "dbname": "prd_db", "user": "postgres", 
+    "password": "postgres", "host": os.getenv("DB_HOST", "localhost")
+}
+OLLAMA_CONFIG = {
+    "model": "qwen3-embedding:4b", 
+    "base_url": os.getenv("OLLAMA_HOST", "http://localhost:11434")
+}
 
-# --- INIT MODELS ---
-llm = ChatGroq(temperature=0.3, groq_api_key=GROQ_API_KEY, model_name="qwen/qwen3-32b") # Sesuaikan model Groq
-embedder = OllamaEmbeddings(model="qwen3-embedding:4b", base_url="http://localhost:11434")
+# --- INIT SERVICES ---
+retriever = FeedbackRetriever(DB_PARAMS, OLLAMA_CONFIG)
+agent = PRDAgent(api_key=GROQ_API_KEY)
 
-# --- DATABASE RETRIEVAL (RAG) ---
-def get_relevant_feedback(query_text, limit=10):
-    query_vec = embedder.embed_query(query_text)
-    conn = psycopg2.connect(**DB_PARAMS)
-    register_vector(conn)
-    cur = conn.cursor()
+# --- WRAPPER FUNCTIONS UNTUK GRADIO EVENTS ---
+def on_generate(obj, users, pain, features, ac, out_scope):
+    inputs = {
+        "1. Objective": obj, "2. Target": users, "3. Pain": pain,
+        "4. Features": features, "5. AC": ac, "6. Out Scope": out_scope
+    }
+    context_query = f"Objektif: {obj}. Fitur: {features}. Pain Points: {pain}"
     
-    # Cosine distance (<=>)
-    cur.execute("""
-        SELECT komentar FROM user_feedback 
-        ORDER BY embedding <=> %s LIMIT %s
-    """, (np.array(query_vec), limit))
+    feedback_context = retriever.get_relevant_feedback(context_query, limit=10)
+    print(f"\n[DEBUG RAG] Feedback ditarik:\n{feedback_context}\n")
     
-    results = [row[0] for row in cur.fetchall()]
-    conn.close()
-    return "\n- " + "\n- ".join(results) if results else "Tidak ada feedback spesifik."
+    markdown_output, new_history = agent.generate_initial(inputs, feedback_context)
+    
+    return markdown_output, new_history, gr.update(visible=False), gr.update(visible=True)
 
-# --- GENERATE PRD LOGIC ---
-def generate_prd(obj, users, pain, features, ac, out_scope, history_state):
-    # 1. ANTI-CRASH: Cegah error saat Gradio mengirim state 'null' pertama kali
-    if history_state is None:
-        history_state = []
-        
-    # Gabungkan input PM untuk dicari relevansinya di Database
-    pm_context = f"Objektif: {obj}. Fitur: {features}. Pain Points: {pain}"
-    
-    # RETRIEVE dari PostgreSQL
-    relevant_feedbacks = get_relevant_feedback(pm_context)
-    print(f"\n[DEBUG RAG] Feedback yang ditarik untuk prompt:\n{relevant_feedbacks}\n")
-    
-    # 2. PENANGKAL CoT: Prompt dibuat sangat galak dan instruktif
-    system_prompt = f"""Kamu adalah Senior Product Manager AI. Buatlah dokumen PRD dalam format Markdown.
-    
-    ATURAN SANGAT KETAT:
-    - JANGAN PERNAH menampilkan proses berpikir, analisa, atau kalimat pembuka seperti "Okay, let me start...", "Baiklah...", atau "Here is the PRD".
-    - OUTPUT HARUS langsung dimulai dengan tag markdown "# Product Requirements Document (PRD)".
-    - Gunakan bahasa Indonesia yang profesional dan lugas.
-    - KEKANGAN SCOPE: Di bagian "Feature Requirements", HANYA tuliskan fitur yang secara eksplisit diminta oleh PM. JANGAN MENCIPTAKAN FITUR BARU berdasarkan feedback database. 
-    - KEKANGAN FEEDBACK: Gunakan feedback dari database HANYA untuk memperkaya dan membuktikan bagian "User Pain Points" dan "Acceptance Criteria". Kelompokkan Pain Points menjadi kategori yang rapi (misal: UI/UX, Performa Sistem).
-    - KEKANGAN OUT OF SCOPE: Jangan mengarang batasan yang tidak relevan. Cukup rapikan input dari PM.
-    
-    Feedback dari database (Gunakan sebagai justifikasi masalah):
-    {relevant_feedbacks}
-    
-    Format Wajib (Selalu 6 Poin Ini):
-    1. Objective & Goals
-    2. Target Users
-    3. User Pain Points (Kelompokkan dengan rapi: Input PM + Realita Database)
-    4. Feature Requirements (HANYA kembangkan dari Input PM)
-    5. Acceptance Criteria (Buat metrik kuantitatif yang jelas)
-    6. Out of Scope
-    """
-    
-    user_prompt = f"Input PM:\n1. Objective: {obj}\n2. Target: {users}\n3. Pain: {pain}\n4. Features: {features}\n5. AC: {ac}\n6. Out Scope: {out_scope}"
-    
-    # Masukkan ke History & Call LLM
-    messages = [SystemMessage(content=system_prompt)]
-    for msg in history_state:
-        messages.append(msg) # Masukkan memory revisi sebelumnya
-        
-    messages.append(HumanMessage(content=user_prompt))
-    
-    response = llm.invoke(messages)
-    raw_output = response.content
-    
-    # 3. FILTER CLEANER: Buang tag <think> jika LLM masih bandel berpikir keras di background
-    clean_output = re.sub(r'<think>.*?</think>', '', raw_output, flags=re.DOTALL).strip()
-    
-    # Simpan interaksi yang sudah bersih ke memory (history_state)
-    history_state.append(HumanMessage(content=user_prompt))
-    history_state.append(AIMessage(content=clean_output))
-    
-    return clean_output, history_state
+def on_revise(instruction, history_state):
+    markdown_output, updated_history = agent.revise(instruction, history_state)
+    return markdown_output, updated_history, gr.update(value="")
 
-# --- APPROVE & EXPORT LOGIC ---
-def approve_and_export(markdown_text, history_state): # Tambah parameter history_state
-    # Bikin PDF pakai markdown-pdf (pure Python)
+def on_approve(markdown_text, history_state):
     pdf = MarkdownPdf(toc_level=2)
     pdf.add_section(Section(markdown_text))
-    
     pdf_filename = "Approved_PRD.pdf"
     pdf.save(pdf_filename)
-    
-    # Kembalikan file PDF dan biarkan history_state UTUH
     return pdf_filename, history_state
 
-# --- UI GRADIO (Single Form Layout) ---
-with gr.Blocks() as demo:
-    gr.Markdown("# 🚀 AI Product Manager Agent (PRD Generator)")
-    
-    # State untuk menyimpan memory per sesi
+def on_reset():
+    return gr.update(visible=True), gr.update(visible=False), [], "", None
+
+# --- UI GRADIO ---
+with gr.Blocks(theme=gr.themes.Monochrome()) as demo:
+    gr.Markdown("# 🚀 AI Product Manager Agent")
     memory_state = gr.State([])
     
     with gr.Row():
         with gr.Column(scale=1):
-            gr.Markdown("### Form Input PM")
-            i_obj = gr.Textbox(label="1. Objective & Goals", lines=2)
-            i_usr = gr.Textbox(label="2. Target Users", lines=1)
-            i_pain = gr.Textbox(label="3. User Pain Points", lines=2)
-            i_feat = gr.Textbox(label="4. Feature Requirements", lines=2)
-            i_ac = gr.Textbox(label="5. Acceptance Criteria", lines=2)
-            i_out = gr.Textbox(label="6. Out of Scope", lines=2)
+            with gr.Column(visible=True) as col_initial:
+                gr.Markdown("### Setup PRD Awal")
+                i_obj = gr.Textbox(label="1. Objective & Goals", lines=2)
+                i_usr = gr.Textbox(label="2. Target Users", lines=1)
+                i_pain = gr.Textbox(label="3. User Pain Points", lines=2)
+                i_feat = gr.Textbox(label="4. Feature Requirements", lines=2)
+                i_ac = gr.Textbox(label="5. Acceptance Criteria", lines=2)
+                i_out = gr.Textbox(label="6. Out of Scope", lines=2)
+                btn_generate = gr.Button("🧠 Generate PRD", variant="primary")
             
-            btn_generate = gr.Button("🧠 Generate / Revise PRD", variant="primary")
+            with gr.Column(visible=False) as col_revise:
+                gr.Markdown("### Chat & Revisi")
+                i_revise = gr.Textbox(label="Instruksi Revisi", lines=3)
+                btn_revise = gr.Button("🔄 Submit Revisi", variant="primary")
+                btn_reset = gr.Button("🗑️ Mulai dari Awal (Reset)", variant="stop")
             
         with gr.Column(scale=1):
             gr.Markdown("### Live PRD Output")
-            out_markdown = gr.Markdown(elem_id="output_md", height=500)
-            
+            out_md = gr.Markdown(elem_id="output_md", height=500)
             with gr.Row():
-                btn_approve = gr.Button("✅ Approve & Generate PDF", variant="secondary")
+                btn_approve = gr.Button("✅ Approve & Generate PDF")
                 out_file = gr.File(label="Download PRD")
 
-    # Events
-    btn_generate.click(
-        fn=generate_prd,
-        inputs=[i_obj, i_usr, i_pain, i_feat, i_ac, i_out, memory_state],
-        outputs=[out_markdown, memory_state]
-    )
-    
-    # Jika di approve, generate file dan reset memory_state menjadi []
-    btn_approve.click(
-        fn=approve_and_export,
-        inputs=[out_markdown, memory_state], # Tambahkan memory_state di sini
-        outputs=[out_file, memory_state]
-    )
+    # Mapping Events
+    btn_generate.click(on_generate, [i_obj, i_usr, i_pain, i_feat, i_ac, i_out], [out_md, memory_state, col_initial, col_revise])
+    btn_revise.click(on_revise, [i_revise, memory_state], [out_md, memory_state, i_revise])
+    btn_reset.click(on_reset, None, [col_initial, col_revise, memory_state, out_md, out_file])
+    btn_approve.click(on_approve, [out_md, memory_state], [out_file, memory_state])
 
-demo.launch(theme=gr.themes.Soft())
+if __name__ == "__main__":
+    demo.launch()
