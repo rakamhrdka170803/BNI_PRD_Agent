@@ -9,7 +9,7 @@ class FeedbackRetriever:
         self.db_config = db_config
         self.embeddings = OllamaEmbeddings(**ollama_config)
 
-    def get_relevant_feedback(self, query_text, limit=10, similarity_threshold=0.8):
+    def get_relevant_feedback(self, query_text, limit=10, similarity_threshold=0.6):
         """
         Menarik feedback dengan aturan:
         1. Prioritas 1: Negatif/Netral dengan similarity >= threshold
