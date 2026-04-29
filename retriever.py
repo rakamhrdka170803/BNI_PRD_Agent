@@ -22,49 +22,42 @@ class FeedbackRetriever:
             register_vector(conn)
             
             with conn.cursor() as cur:
-                # Menggunakan CTE (WITH) agar kita bisa menghitung similarity sekali saja
-                # lalu menggunakan hasilnya untuk logika IF/ELSE (CASE) di bawahnya.
+                # ... di dalam fungsi get_relevant_feedback ...
                 query = """
                     WITH calculated_sim AS (
                         SELECT 
+                            source, -- Tambahkan source
                             sentimen, 
                             komentar, 
                             1 - (embedding <=> %s) AS similarity
                         FROM user_feedback
                     )
-                    SELECT sentimen, komentar, similarity
+                    SELECT source, sentimen, komentar, similarity
                     FROM calculated_sim
                     ORDER BY 
                         CASE 
-                            -- Kasta 1: Negatif/Netral & Lolos Threshold
                             WHEN sentimen IN ('Negatif', 'Netral') AND similarity >= %s THEN 1
-                            -- Kasta 2: Positif & Lolos Threshold
                             WHEN sentimen = 'Positif' AND similarity >= %s THEN 2
-                            -- Kasta 3: Tidak lolos threshold (diambil kalau slot masih sisa)
                             ELSE 3 
                         END ASC,
-                        -- Dalam kasta yang sama, urutkan dari yang paling mirip
                         similarity DESC
                     LIMIT %s;
                 """
                 
-                # Masukkan parameter (query_vec, threshold, threshold, limit)
                 cur.execute(query, (np.array(query_vec), similarity_threshold, similarity_threshold, limit))
-                
                 rows = cur.fetchall()
                 
-                # Format output agar menampilkan skor similarity di terminal
                 results = []
                 for row in rows:
-                    sentimen = row[0]
-                    komentar = row[1]
-                    skor = round(row[2], 3) # Bulatkan skor ke 3 desimal
+                    source = row[0]
+                    sentimen = row[1]
+                    komentar = row[2]
+                    skor = round(row[3], 3)
                     
-                    # Tampilan: [Negatif | Skor: 0.852] ini komentarnya...
-                    results.append(f"[{sentimen} | Skor: {skor}] {komentar}")
+                    # Tampilan: [App Store] [Negatif | Skor: 0.852] komentar...
+                    results.append(f"[{source}] [{sentimen} | Skor: {skor}] {komentar}")
                 
-                return "\n- " + "\n- ".join(results) if results else "Tidak ada feedback spesifik."
-                
+                return "\n- " + "\n- ".join(results) if results else "Tidak ada feedback spesifik."  
         except Exception as e:
             logging.error(f"Error retrieving feedback: {e}")
             return "Gagal menarik data dari database."
