@@ -1,5 +1,7 @@
 import gradio as gr
 import os
+import llmops
+from llmops import SpanType
 from dotenv import load_dotenv
 from markdown_pdf import MarkdownPdf, Section
 
@@ -8,37 +10,44 @@ from retriever import FeedbackRetriever
 from agent_logic import PRDAgent
 
 load_dotenv(override=True)
+llmops.autolog("langchain")
 
 # --- KONFIGURASI GLOBAL ---
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "qwen/qwen3-32b")
 DB_PARAMS = {
-    "dbname": "prd_db", "user": "postgres", 
-    "password": "postgres", "host": os.getenv("DB_HOST", "localhost")
+    "dbname": os.getenv("DB_NAME", "prd_db"),
+    "user": os.getenv("DB_USER", "postgres"),
+    "password": os.getenv("DB_PASSWORD", ""),
+    "host": os.getenv("DB_HOST", "localhost"),
+    "port": os.getenv("DB_PORT", "5432"),
 }
 OLLAMA_CONFIG = {
-    "model": "qwen3-embedding:4b", 
-    "base_url": os.getenv("OLLAMA_HOST", "http://localhost:11434")
+    "model": os.getenv("OLLAMA_EMBED_MODEL", "qwen3-embedding:4b"),
+    "base_url": os.getenv("OLLAMA_HOST", "http://localhost:11434"),
 }
 
 # --- INIT SERVICES ---
 retriever = FeedbackRetriever(DB_PARAMS, OLLAMA_CONFIG)
-agent = PRDAgent(api_key=GROQ_API_KEY)
+agent = PRDAgent(api_key=GROQ_API_KEY, model_name=GROQ_MODEL)
 
 # --- WRAPPER FUNCTIONS UNTUK GRADIO EVENTS ---
+@llmops.trace_agent("user_generate", span_type=SpanType.AGENT)
 def on_generate(obj, users, pain, features, ac, out_scope):
     inputs = {
         "1. Objective": obj, "2. Target": users, "3. Pain": pain,
         "4. Features": features, "5. AC": ac, "6. Out Scope": out_scope
     }
     context_query = f"Objektif: {obj}. Fitur: {features}. Pain Points: {pain}"
-    
+
     feedback_context = retriever.get_relevant_feedback(context_query, limit=10)
     print(f"\n[DEBUG RAG] Feedback ditarik:\n{feedback_context}\n")
-    
+
     markdown_output, new_history = agent.generate_initial(inputs, feedback_context)
-    
+
     return markdown_output, new_history, gr.update(visible=False), gr.update(visible=True)
 
+@llmops.trace_agent("user_revise", span_type=SpanType.AGENT)
 def on_revise(instruction, history_state):
     markdown_output, updated_history = agent.revise(instruction, history_state)
     return markdown_output, updated_history, gr.update(value="")

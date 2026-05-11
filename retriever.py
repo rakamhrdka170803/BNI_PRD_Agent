@@ -3,12 +3,15 @@ from pgvector.psycopg2 import register_vector
 import numpy as np
 from langchain_ollama import OllamaEmbeddings
 import logging
+import llmops
+from llmops import SpanType
 
 class FeedbackRetriever:
     def __init__(self, db_config, ollama_config):
         self.db_config = db_config
         self.embeddings = OllamaEmbeddings(**ollama_config)
 
+    @llmops.trace_agent("rag_retrieval", span_type=SpanType.RETRIEVER)
     def get_relevant_feedback(self, query_text, limit=10, similarity_threshold=0.6):
         """
         Menarik feedback dengan aturan:
